@@ -19,6 +19,79 @@ from skgstat import models
 
 from . import Topography
 
+def spectral_synthesis_field(RF, shape, res=1.0):
+    """
+    Generate a 2D Gaussian random field using FFT-based spectral synthesis.
+    This method uses a fast Fourier transform approach to produce spatially correlated
+    random fields consistent with the variogram model stored in the RandField object.
+
+    Args:
+        RF (RandField): 
+        shape (tuple[int,int]): 
+        res (float, optional):
+
+    Returns:
+        np.ndarray:
+            A 2D NumPy array of shape (ny, nx) representing a single random field 
+            realization generated using the FFT-based spectral synthesis method.
+            The field has zero mean and unit variance before scaling, then scaled 
+            by the sampled vertical standard deviation (`scale`) and augmented 
+            with Gaussian nugget noise. 
+    """
+    
+    ny, nx = shape
+    rng = RF.rng
+
+    # Sample model parameters
+    scale = rng.uniform(RF.scale_min, RF.scale_max) / 3.0
+    nug = rng.uniform(0.0, RF.nugget_max)
+
+    if not RF.isotropic:
+        range_x = rng.uniform(RF.range_min_x, RF.range_max_x)
+        range_y = rng.uniform(RF.range_min_y, RF.range_max_y)
+    else:
+        range_x = range_y = rng.uniform(RF.range_min_x, RF.range_max_x)
+
+    model_name = RF.model_name
+    if model_name == "Gaussian":
+        len_x, len_y = range_x / np.sqrt(3), range_y / np.sqrt(3)
+    elif model_name == "Exponential":
+        len_x, len_y = range_x / 3.0, range_y / 3.0
+    else:  # Matern
+        len_x, len_y = range_x / 2.0, range_y / 2.0
+
+    # Frequency grids
+    kx = np.fft.fftfreq(nx, d=res) * 2 * np.pi
+    ky = np.fft.fftfreq(ny, d=res) * 2 * np.pi
+    kyv, kxv = np.meshgrid(ky, kx, indexing="ij")
+    k = np.sqrt(kxv**2 + kyv**2) + 1e-10
+
+    # Spectral power density
+    if model_name == "Gaussian":
+        a = np.sqrt((len_x * len_y))
+        S = np.exp(-0.5 * (a * k) ** 2)
+    elif model_name == "Exponential":
+        a = np.sqrt((len_x * len_y))
+        S = 1.0 / (1.0 + (a * k) ** 2) ** 1.5
+    else:  # Matern (approximate)
+        nu = RF.smoothness or 1.0
+        a = np.sqrt((len_x * len_y))
+        S = 1.0 / (1.0 + (a * k) ** 2) ** (nu + 1)
+
+    # Complex white noise
+    noise = np.random.normal(size=(ny, nx)) + 1j * np.random.normal(size=(ny, nx))
+    freq_field = noise * np.sqrt(S)
+
+    # Inverse FFT
+    field = np.fft.ifft2(freq_field).real
+    field = (field - np.mean(field)) / (np.std(field) + 1e-12)
+
+    # Apply scaling and nugget noise
+    field = field * scale + np.random.normal(0, np.sqrt(nug), size=(ny, nx))
+
+    return field
+
+
 def fit_variogram(data, coords, roughness_region_mask, maxlag, n_lags=50, samples=0.6, subsample=100000, data_for_trans = []):
     """
     This function computes an experimental variogram from the input data and fits
@@ -356,8 +429,12 @@ class RandField:
 
         fields = np.zeros((n,len(Y),len(X)))
         for i in range(n):
-            srf = gstools.SRF(model)
-            fields[i,:,:] = srf.structured([X, Y]).T*scale + _mean
+            # Covariance model field generation
+            #srf = gstools.SRF(model)
+            #fields[i,:,:] = srf.structured([X, Y]).T*scale + _mean
+            
+            # Spectral synthesis field generation
+            fields[i,:,:] = spectral_synthesis_field(self, (len(Y), len(X)), res=self.resolution)
 
         return fields
     

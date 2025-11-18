@@ -16,8 +16,90 @@ import gstatsim as gs
 import gstools as gstools
 import skgstat as skg
 from skgstat import models
+from tqdm.auto import tqdm
+from IPython import display
+import math
 
 from . import Topography
+
+def spectral_synthesis_field(RF, shape, res=1.0):
+    """
+    Generate a 2D Gaussian random field using FFT-based spectral synthesis.
+    This method uses a fast Fourier transform approach to produce spatially correlated
+    random fields consistent with the variogram model stored in the RandField object.
+
+    Args:
+        RF (RandField): 
+        shape (tuple[int,int]): 
+        res (float, optional):
+
+    Returns:
+        np.ndarray:
+            A 2D NumPy array of shape (ny, nx) representing a single random field 
+            realization generated using the FFT-based spectral synthesis method.
+            The field has zero mean and unit variance before scaling, then scaled 
+            by the sampled vertical standard deviation (`scale`) and augmented 
+            with Gaussian nugget noise. 
+    """
+    
+    ny, nx = shape
+    rng = RF.rng
+
+    # Sample model parameters
+    scale = rng.uniform(RF.scale_min, RF.scale_max) / 3.0
+    nug = rng.uniform(0.0, RF.nugget_max)
+
+    if not RF.isotropic:
+        range_x = rng.uniform(RF.range_min_x, RF.range_max_x)
+        range_y = rng.uniform(RF.range_min_y, RF.range_max_y)
+    else:
+        range_x = range_y = rng.uniform(RF.range_min_x, RF.range_max_x)
+
+    model_name = RF.model_name
+    if model_name == "Gaussian":
+        len_x, len_y = range_x / np.sqrt(3), range_y / np.sqrt(3)
+    elif model_name == "Exponential":
+        len_x, len_y = range_x / 3.0, range_y / 3.0
+    else:  # Matern
+        len_x, len_y = range_x / 2.0, range_y / 2.0
+        #len_x, len_y = range_x, range_y
+
+    #print(len_x, len_y, '3')
+
+    # Frequency grids
+    kx = np.fft.fftfreq(nx, d=res) * 2 * np.pi
+    ky = np.fft.fftfreq(ny, d=res) * 2 * np.pi
+    kyv, kxv = np.meshgrid(ky, kx, indexing="ij")
+    k = np.sqrt(kxv**2 + kyv**2) + 1e-10
+
+    # Spectral power density
+    if model_name == "Gaussian":
+        a = np.sqrt((len_x * len_y))
+        S = np.exp(-0.5 * (a * k) ** 2)
+    elif model_name == "Exponential":
+        a = np.sqrt((len_x * len_y))
+        S = 1.0 / (1.0 + (a * k) ** 2) ** 1.5
+    else:  # Matern (approximate)
+        nu = RF.smoothness or 1.0
+        a = np.sqrt((len_x * len_y))
+        #S = 1.0 / (1.0 + (a * k) ** 2) ** (nu + 1)
+        constant = (4 * np.pi * math.gamma(nu + 1) * (2 * nu)**nu) / (math.gamma(nu) * a**(2*nu))
+        keppa = 2*nu/(a**2)
+        S = constant * ((keppa + 4 * np.pi * k**2) ** (-nu - 1))
+
+    # Complex white noise
+    noise = np.random.normal(size=(ny, nx)) + 1j * np.random.normal(size=(ny, nx))
+    freq_field = noise * np.sqrt(S)
+
+    # Inverse FFT
+    field = np.fft.ifft2(freq_field).real
+    field = (field - np.mean(field)) / (np.std(field) + 1e-12)
+
+    # Apply scaling and nugget noise
+    field = field * scale + np.random.normal(0, np.sqrt(nug), size=(ny, nx))
+
+    return field
+
 
 def fit_variogram(data, coords, roughness_region_mask, maxlag, n_lags=50, samples=0.6, subsample=100000, data_for_trans = []):
     """
@@ -147,7 +229,7 @@ class RandField:
     """
     
     def __init_func(self):
-        print("Before using the `RandField` object in an MCMC chain or for field generation, call method `set_block_sizes` and method`set_weight_param` to initialize block size ranges and conditional weighting parameters.")
+        print("Before using the `RandField` object in an MCMC chain or for field generation, \n call function `set_block_sizes` to initialize block size ranges; \n call function `set_weight_param` to set up conditional weighting parameters; \n call function 'set_generation_method' to set up method used to generate random fields.")
 
     def __init__(self,range_min_x,range_max_x,range_min_y,range_max_y,scale_min,scale_max,nugget_max,model_name,isotropic,smoothness = None, rng_seed=None):
         """Initializes the RandField object.
@@ -200,6 +282,16 @@ class RandField:
         self.isotropic = isotropic
         
         self.__init_func()
+        
+    def set_generation_method(self,spectral):
+        """
+        Define the generation method. If spectral is False, then use gstools RandMeth generator. Otherwise, use spectral systhesis to generate random field
+        
+        Args:
+            spectral (bool): Whether use spectral synthesis to generate random field
+        """
+        
+        self.spectral = spectral
            
     def set_block_sizes(self,min_block_x,max_block_x,min_block_y,max_block_y,steps=5):
         """
@@ -356,10 +448,14 @@ class RandField:
 
         fields = np.zeros((n,len(Y),len(X)))
         for i in range(n):
+            # Covariance model field generation
             srf = gstools.SRF(model)
             fields[i,:,:] = srf.structured([X, Y]).T*scale + _mean
+            
+            # Spectral synthesis field generation
+            #fields[i,:,:] = spectral_synthesis_field(self, (len(Y), len(X)), res=self.resolution)
 
-        return fields
+        return fields[0,:,:]
     
     def min_dist(hard_mat, xx, yy):
         """
@@ -466,8 +562,13 @@ class RandField:
         #in-case of a weird bug
         while True:
             ## TODO: have to modify this for n>1
-            f = self.get_random_field(x_uniq, y_uniq)
-            f = f[0,:,:]
+            #f = self.get_random_field(x_uniq, y_uniq)
+            if self.spectral == True:
+                f = spectral_synthesis_field(self, (len(y_uniq), len(x_uniq)), res=self.resolution)
+            else:
+                f = self.get_random_field(x_uniq, y_uniq)
+                
+            #f = f[0,:,:]
             if (np.sum(np.isnan(f))) != 0:
                 print('f have nan')
                 continue
@@ -769,7 +870,7 @@ class chain_crf(chain):
         crf_weight, dist, dist_rescale, dist_logi = RF.get_crf_weight(self.xx,self.yy,self.data_mask)
         self.crf_data_weight = crf_weight
 
-    def run(self, n_iter, RF, rng_seed=None, only_save_last_bed=False, info_per_iter = 1000):
+    def run(self, n_iter, RF, rng_seed=None, only_save_last_bed=False, info_per_iter = 1000, plot=True, progress_bar=True):
         """Runs the MCMC sampling chain to generate topography realizations.
 
         Args:
@@ -828,7 +929,39 @@ class chain_crf(chain):
         
         #crf_weight = self.crf_data_weight
 
-        for i in range(1,n_iter):
+        if plot:
+            fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12,5))
+            (line_loss,) = ax_loss.plot([], [], color='tab:blue', label='Loss')
+            (line_acc,)  = ax_acc.plot([], [], color='tab:green', label='Acceptance Rate')
+            #NOTE use get_mass_conservation_residual on BedMachine data
+            # bm_loss = 
+            # ax_loss.axhline(bm_loss, ls='--', label='BedMachine loss') 
+            
+            ax_loss.set_xlabel("Iteration")
+            ax_loss.set_ylabel("Loss")
+            ax_loss.set_title("MCMC Loss")
+
+            ax_acc.set_xlabel("Iteration")
+            ax_acc.set_ylabel("Acceptance Rate (%)")
+            ax_acc.set_ylim(0, 100)
+            ax_acc.set_title("MCMC Acceptance Rate")
+
+            ax_loss.legend()
+            ax_acc.legend()
+            
+            display_handle = display.display(fig, display_id=True)
+            plt.tight_layout()
+
+        # Track acceptance rate
+        accepted_count = 0
+        acceptance_rates = []
+
+        if progress_bar == True:
+            iterator = tqdm(range(1,n_iter)) 
+        else:
+            iterator = range(1,n_iter)
+        #pbar = tqdm(range(1,n_iter))
+        for i in iterator:
                         
             #not done yet
             f = RF.get_rfblock()
@@ -910,6 +1043,8 @@ class chain_crf(chain):
                     resampled_times[bxmin:bxmax,bymin:bymax] += self.region_mask[bxmin:bxmax,bymin:bymax]
                 else:
                     resampled_times[bxmin:bxmax,bymin:bymax] += self.grounded_ice_mask[bxmin:bxmax,bymin:bymax]
+
+                accepted_count += 1
                 
             else:
                 loss_mc_cache[i] = loss_prev_mc
@@ -920,8 +1055,41 @@ class chain_crf(chain):
             if not only_save_last_bed:
                 bed_cache[i,:,:] = bed_c
 
-            if i%info_per_iter == 0:
-                print(f'i: {i} mc loss: {loss_mc_cache[i]:.3e} data loss: {loss_data_cache[i]:.3e} loss: {loss_cache[i]:.3e} acceptance rate: {np.sum(step_cache)/(i+1)}')
+            if progress_bar:
+                # Update tqdm progress bar
+                iterator.set_postfix({
+                    'mc loss'   :   f'{loss_mc_cache[i]:.3e}',
+                    'data loss' :   f'{loss_data_cache[i]:.3e}',
+                    'loss'      :   f'{loss_cache[i]:.3e}',
+                    'acceptance rate'   :   f'{np.sum(step_cache)/(i+1):.6f}'
+                })
+            else:
+                if i%info_per_iter == 0:
+                    print(f'i: {i} mc loss: {loss_mc_cache[i]:.3e} data loss: {loss_data_cache[i]:.3e} loss: {loss_cache[i]:.3e} acceptance rate: {np.sum(step_cache)/(i+1)}')
+
+            # Calculate acceptance rate for plot
+            total_acceptance = (accepted_count / (i + 1)) * 100
+            acceptance_rates.append(total_acceptance)
+
+            if plot:
+                if i < 5000:
+                    update_interval = 100
+                else:
+                    update_interval = info_per_iter
+
+                if i % update_interval == 0:
+                    # Update loss line
+                    line_loss.set_data(range(i + 1), loss_cache[:i + 1])
+                    ax_loss.relim()
+                    ax_loss.autoscale_view()
+
+                    # Update acceptance rate line
+                    line_acc.set_data(range(len(acceptance_rates)), acceptance_rates)
+                    ax_acc.set_ylim(0, 100)
+                    ax_acc.relim()
+                    ax_acc.autoscale_view()
+
+                    display_handle.update(fig)
                 
         if not only_save_last_bed:
             return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache

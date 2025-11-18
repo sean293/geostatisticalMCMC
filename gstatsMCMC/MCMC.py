@@ -16,8 +16,9 @@ import gstatsim as gs
 import gstools as gstools
 import skgstat as skg
 from skgstat import models
-from tqdm.notebook import tqdm
+from tqdm.auto import tqdm
 from IPython import display
+import math
 
 from . import Topography
 
@@ -61,6 +62,9 @@ def spectral_synthesis_field(RF, shape, res=1.0):
         len_x, len_y = range_x / 3.0, range_y / 3.0
     else:  # Matern
         len_x, len_y = range_x / 2.0, range_y / 2.0
+        #len_x, len_y = range_x, range_y
+
+    #print(len_x, len_y, '3')
 
     # Frequency grids
     kx = np.fft.fftfreq(nx, d=res) * 2 * np.pi
@@ -78,7 +82,10 @@ def spectral_synthesis_field(RF, shape, res=1.0):
     else:  # Matern (approximate)
         nu = RF.smoothness or 1.0
         a = np.sqrt((len_x * len_y))
-        S = 1.0 / (1.0 + (a * k) ** 2) ** (nu + 1)
+        #S = 1.0 / (1.0 + (a * k) ** 2) ** (nu + 1)
+        constant = (4 * np.pi * math.gamma(nu + 1) * (2 * nu)**nu) / (math.gamma(nu) * a**(2*nu))
+        keppa = 2*nu/(a**2)
+        S = constant * ((keppa + 4 * np.pi * k**2) ** (-nu - 1))
 
     # Complex white noise
     noise = np.random.normal(size=(ny, nx)) + 1j * np.random.normal(size=(ny, nx))
@@ -222,7 +229,7 @@ class RandField:
     """
     
     def __init_func(self):
-        print("Before using the `RandField` object in an MCMC chain or for field generation, call method `set_block_sizes` and method`set_weight_param` to initialize block size ranges and conditional weighting parameters.")
+        print("Before using the `RandField` object in an MCMC chain or for field generation, \n call function `set_block_sizes` to initialize block size ranges; \n call function `set_weight_param` to set up conditional weighting parameters; \n call function 'set_generation_method' to set up method used to generate random fields.")
 
     def __init__(self,range_min_x,range_max_x,range_min_y,range_max_y,scale_min,scale_max,nugget_max,model_name,isotropic,smoothness = None, rng_seed=None):
         """Initializes the RandField object.
@@ -275,6 +282,16 @@ class RandField:
         self.isotropic = isotropic
         
         self.__init_func()
+        
+    def set_generation_method(self,spectral):
+        """
+        Define the generation method. If spectral is False, then use gstools RandMeth generator. Otherwise, use spectral systhesis to generate random field
+        
+        Args:
+            spectral (bool): Whether use spectral synthesis to generate random field
+        """
+        
+        self.spectral = spectral
            
     def set_block_sizes(self,min_block_x,max_block_x,min_block_y,max_block_y,steps=5):
         """
@@ -432,13 +449,13 @@ class RandField:
         fields = np.zeros((n,len(Y),len(X)))
         for i in range(n):
             # Covariance model field generation
-            #srf = gstools.SRF(model)
-            #fields[i,:,:] = srf.structured([X, Y]).T*scale + _mean
+            srf = gstools.SRF(model)
+            fields[i,:,:] = srf.structured([X, Y]).T*scale + _mean
             
             # Spectral synthesis field generation
-            fields[i,:,:] = spectral_synthesis_field(self, (len(Y), len(X)), res=self.resolution)
+            #fields[i,:,:] = spectral_synthesis_field(self, (len(Y), len(X)), res=self.resolution)
 
-        return fields
+        return fields[0,:,:]
     
     def min_dist(hard_mat, xx, yy):
         """
@@ -545,8 +562,13 @@ class RandField:
         #in-case of a weird bug
         while True:
             ## TODO: have to modify this for n>1
-            f = self.get_random_field(x_uniq, y_uniq)
-            f = f[0,:,:]
+            #f = self.get_random_field(x_uniq, y_uniq)
+            if self.spectral == True:
+                f = spectral_synthesis_field(self, (len(y_uniq), len(x_uniq)), res=self.resolution)
+            else:
+                f = self.get_random_field(x_uniq, y_uniq)
+                
+            #f = f[0,:,:]
             if (np.sum(np.isnan(f))) != 0:
                 print('f have nan')
                 continue
@@ -848,7 +870,7 @@ class chain_crf(chain):
         crf_weight, dist, dist_rescale, dist_logi = RF.get_crf_weight(self.xx,self.yy,self.data_mask)
         self.crf_data_weight = crf_weight
 
-    def run(self, n_iter, RF, rng_seed=None, only_save_last_bed=False, info_per_iter = 1000, plot=True):
+    def run(self, n_iter, RF, rng_seed=None, only_save_last_bed=False, info_per_iter = 1000, plot=True, progress_bar=True):
         """Runs the MCMC sampling chain to generate topography realizations.
 
         Args:
@@ -907,8 +929,6 @@ class chain_crf(chain):
         
         #crf_weight = self.crf_data_weight
 
-        pbar = tqdm(range(1,n_iter))
-
         if plot:
             fig, (ax_loss, ax_acc) = plt.subplots(1, 2, figsize=(12,5))
             (line_loss,) = ax_loss.plot([], [], color='tab:blue', label='Loss')
@@ -932,11 +952,16 @@ class chain_crf(chain):
             display_handle = display.display(fig, display_id=True)
             plt.tight_layout()
 
-            # Track acceptance rate
-            accepted_count = 0
-            acceptance_rates = []
+        # Track acceptance rate
+        accepted_count = 0
+        acceptance_rates = []
 
-        for i in pbar:
+        if progress_bar == True:
+            iterator = tqdm(range(1,n_iter)) 
+        else:
+            iterator = range(1,n_iter)
+        #pbar = tqdm(range(1,n_iter))
+        for i in iterator:
                         
             #not done yet
             f = RF.get_rfblock()
@@ -1030,18 +1055,17 @@ class chain_crf(chain):
             if not only_save_last_bed:
                 bed_cache[i,:,:] = bed_c
 
-            ''' Original progress bar
-            if i%info_per_iter == 0:
-                print(f'i: {i} mc loss: {loss_mc_cache[i]:.3e} data loss: {loss_data_cache[i]:.3e} loss: {loss_cache[i]:.3e} acceptance rate: {np.sum(step_cache)/(i+1)}')
-            '''
-
-            # Update tqdm progress bar
-            pbar.set_postfix({
-                'mc loss'   :   f'{loss_mc_cache[i]:.3e}',
-                'data loss' :   f'{loss_data_cache[i]:.3e}',
-                'loss'      :   f'{loss_cache[i]:.3e}',
-                'acceptance rate'   :   f'{np.sum(step_cache)/(i+1):.6f}'
-            })
+            if progress_bar:
+                # Update tqdm progress bar
+                iterator.set_postfix({
+                    'mc loss'   :   f'{loss_mc_cache[i]:.3e}',
+                    'data loss' :   f'{loss_data_cache[i]:.3e}',
+                    'loss'      :   f'{loss_cache[i]:.3e}',
+                    'acceptance rate'   :   f'{np.sum(step_cache)/(i+1):.6f}'
+                })
+            else:
+                if i%info_per_iter == 0:
+                    print(f'i: {i} mc loss: {loss_mc_cache[i]:.3e} data loss: {loss_data_cache[i]:.3e} loss: {loss_cache[i]:.3e} acceptance rate: {np.sum(step_cache)/(i+1)}')
 
             # Calculate acceptance rate for plot
             total_acceptance = (accepted_count / (i + 1)) * 100

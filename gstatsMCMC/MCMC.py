@@ -1006,10 +1006,35 @@ class chain_crf(chain):
                 bed_next = np.where(self.region_mask, bed_next, bed_c)
             else:
                 bed_next = np.where(self.grounded_ice_mask, bed_next, bed_c)
-                
-            mc_res = Topography.get_mass_conservation_residual(bed_next, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)
+
+            # Define Padded Block to solve gradient & mass conservation residual (MSR)
+            pad = 1 
+            c_xmin = np.max([0, bxmin - pad])              # neighbor to the left boundary
+            c_xmax = np.min([bed_c.shape[0], bxmax + pad]) # neighbor to the right boundary
+            c_ymin = np.max([0, bymin - pad])              # neighbor to the lower boundary
+            c_ymax = np.min([bed_c.shape[1], bymax + pad]) # neighbor to the upper boundary
+
+            # Define the BLOCK index to compute MSR -- which needs neighbors for np.gradient
+            local_bed = bed_next[c_xmin:c_xmax, c_ymin:c_ymax]
+            local_surf = self.surf[c_xmin:c_xmax, c_ymin:c_ymax]
+            local_velx = self.velx[c_xmin:c_xmax, c_ymin:c_ymax]
+            local_vely = self.vely[c_xmin:c_xmax, c_ymin:c_ymax]
+            local_dhdt = self.dhdt[c_xmin:c_xmax, c_ymin:c_ymax]
+            local_smb  = self.smb[c_xmin:c_xmax, c_ymin:c_ymax]
+
+            local_mc_res = Topography.get_mass_conservation_residual(
+                        local_bed, local_surf, local_velx, local_vely, local_dhdt, local_smb, resolution)   
+            mc_res_candidate = mc_res.copy()
+            # Our TARGET slice index
+            valid_x_start = bxmin - c_xmin
+            valid_x_end = valid_x_start + (bxmax - bxmin)
+            valid_y_start = bymin - c_ymin
+            valid_y_end = valid_y_start + (bymax - bymin)
+            mc_res_candidate[bxmin:bxmax, bymin:bymax] = local_mc_res[valid_x_start:valid_x_end, valid_y_start:valid_y_end]
+
+
             data_diff = bed_next - self.cond_bed
-            loss_next, loss_next_mc, loss_next_data = self.loss(mc_res,data_diff)
+            loss_next, loss_next_mc, loss_next_data = self.loss(mc_res_candidate,data_diff)
            
             #make sure no bed elevation is greater than surface elevation
             block_thickness = self.surf[bxmin:bxmax,bymin:bymax] - bed_next[bxmin:bxmax,bymin:bymax]
@@ -1031,6 +1056,7 @@ class chain_crf(chain):
             if (u <= acceptance_rate):
                 bed_c = bed_next.copy()
                 
+                mc_res = mc_res_candidate # Update global residual if new slice is accepted
                 loss_prev = loss_next
                 loss_prev_mc = loss_next_mc
                 loss_cache[i] = loss_next

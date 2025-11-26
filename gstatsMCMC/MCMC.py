@@ -1440,11 +1440,11 @@ class chain_sgs(chain):
         blocks_cache = np.full((n_iter, 4), np.nan)
         
         if self.detrend_map:
-            bed_c = self.initial_bed - self.trend
-            cond_bed_c = self.cond_bed - self.trend
+            bed_c = (self.initial_bed - self.trend).copy()
+            cond_bed_c = (self.cond_bed - self.trend).copy()
         else:
-            bed_c = self.initial_bed
-            cond_bed_c = self.cond_bed
+            bed_c = self.initial_bed.copy()
+            cond_bed_c = self.cond_bed.copy()
 
         
         if self.do_transform:
@@ -1452,8 +1452,8 @@ class chain_sgs(chain):
             z = nst_trans.transform(bed_c.reshape(-1,1))
             z_cond_bed = nst_trans.transform(cond_bed_c.reshape(-1,1))
         else:
-            z = bed_c.reshape(-1,1)
-            z_cond_bed = cond_bed_c.reshape(-1,1)
+            z = bed_c.copy().reshape(-1,1)
+            z_cond_bed = cond_bed_c.copy().reshape(-1,1)
             
         cond_bed_data = np.array([self.xx.flatten(),self.yy.flatten(),z_cond_bed.flatten()])
         cond_bed_df = pd.DataFrame(cond_bed_data.T, columns=['x','y','cond_bed'])
@@ -1664,21 +1664,21 @@ class chain_sgs(chain):
             bed_cache = np.zeros((n_iter, rows, cols))
         blocks_cache = np.full((n_iter, 4), np.nan)
         resampled_times = np.zeros(self.xx.shape)
-        
+
         if self.detrend_map:
-            bed_c = self.initial_bed - self.trend
-            cond_bed_c = self.cond_bed - self.trend
+            bed_c = (self.initial_bed - self.trend).copy()
+            cond_bed_c = (self.cond_bed - self.trend).copy()
         else:
-            bed_c = self.initial_bed
-            cond_bed_c = self.cond_bed
-           
+            bed_c = self.initial_bed.copy()
+            cond_bed_c = self.cond_bed.copy()
+       
         if self.do_transform:
             nst_trans = self.nst_trans
             z = nst_trans.transform(bed_c.reshape(-1,1))
             z_cond_bed = nst_trans.transform(cond_bed_c.reshape(-1,1))
         else:
-            z = bed_c.reshape(-1,1)
-            z_cond_bed = cond_bed_c.reshape(-1,1)
+            z = bed_c.copy().reshape(-1,1)
+            z_cond_bed = cond_bed_c.copy().reshape(-1,1)
     
         z_cond_bed = z_cond_bed.reshape(self.xx.shape)
 
@@ -1745,17 +1745,17 @@ class chain_sgs(chain):
             if self.do_transform == True:
                 bed_tosim = nst_trans.transform(bed_c.reshape(-1,1)).reshape(self.xx.shape)
             else:
-                bed_tosim = bed_c
+                bed_tosim = bed_c.copy()
     
             bed_tosim[bxmin:bxmax,bymin:bymax] = z_cond_bed[bxmin:bxmax,bymin:bymax].copy()
             sim_mask = np.full(self.xx.shape, False)
             sim_mask[bxmin:bxmax,bymin:bymax] = True
-            newsim = sgs(self.xx, self.yy, bed_tosim, vario, rad, neighbors, seed=0, sim_mask = sim_mask)
+            newsim = sgs(self.xx, self.yy, bed_tosim, vario, rad, neighbors, sim_mask = sim_mask)
     
             if self.do_transform == True:
                 bed_next = nst_trans.inverse_transform(newsim.reshape(-1,1)).reshape(rows,cols)
             else:
-                bed_next = newsim
+                bed_next = newsim.copy()
             
             if self.detrend_map == True:
                 mc_res = Topography.get_mass_conservation_residual(bed_next + self.trend, self.surf, self.velx, self.vely, self.dhdt, self.smb, resolution)

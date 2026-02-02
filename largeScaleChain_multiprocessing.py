@@ -12,6 +12,7 @@ import multiprocessing as mp
 from pathlib import Path
 import os
 import sys
+import scipy as sp
 
 def largeScaleChain_mp(n_chains,n_workers,largeScaleChain,rf,initial_beds,rng_seeds,n_iters,output_path='./Data/output'):
     '''
@@ -39,23 +40,25 @@ def largeScaleChain_mp(n_chains,n_workers,largeScaleChain,rf,initial_beds,rng_se
     tic = time.time()
     
     params = []
-    example_chain = largeScaleChain.__dict__ #retrive parameters from the existing chain / RandField
+
+    # Retrive parameters from the existing chain / RandField
+    example_chain = largeScaleChain.__dict__ 
     example_RF = rf.__dict__
 
-   # modify some of the parameters based on the input rng_seeds, initial_beds, and n_iters
+   # Modify some of the parameters based on the input rng_seeds, initial_beds, and n_iters
     for i in range(n_chains):   
         chain_param = deepcopy(example_chain)
         chain_param['rng_seed'] = rng_seeds[i]
         chain_param['initial_bed'] = initial_beds[i]
 
-        run_param = {} # a dictionary of parameters passed in the run() function
+        run_param = {} # A dictionary of parameters passed in the run() function
         run_param['n_iter'] = n_iters[i]
-        run_param['only_save_last_bed']=True # some display parameters are fixed.
+        run_param['only_save_last_bed']=True # Some display parameters are fixed.
         run_param['info_per_iter']=1000
         run_param['plot']=False
         run_param['progress_bar']=False
         run_param['chain_id'] = i
-        run_param['tqdm_position'] = i + 2 # 2 lines for header
+        run_param['tqdm_position'] = i + 1 # 1 extra line for header
         run_param['seed'] = rng_seeds[i]
         run_param['output_path'] = str(Path(output_path) / 'LargeScaleChain')
 
@@ -64,14 +67,14 @@ def largeScaleChain_mp(n_chains,n_workers,largeScaleChain,rf,initial_beds,rng_se
     # Print header and reserve space for progress bars
     print('Running MCMC chains...')
     print('\n' * (n_chains + 1))
-    sys.stdout.flush() # force output into the terminal
+    sys.stdout.flush() # Force output into the terminal
     
-    # the multiprocessing step
+    # The multiprocessing step
     with mp.Pool(n_workers) as pool:
         result = pool.starmap(lsc_run_wrapper, params)
 
     # Move cursor below chain outputs before printing the timing
-    print('\n' * (n_chains + 2))
+    print('\n' * (n_chains + 1))
 
     toc = time.time()
     print(f'Completed in {toc-tic:.2f} seconds')
@@ -79,7 +82,20 @@ def largeScaleChain_mp(n_chains,n_workers,largeScaleChain,rf,initial_beds,rng_se
     return result
 
 def lsc_run_wrapper(param_chain, param_rf, param_run):
-    # a function used to initialize chain by input parameters and run the chains
+    '''
+    A function used to initialize chain by input parameters and run the chains
+
+    Parameters
+    ----------
+    param_chain (dict): Dictionary containing parameters needed to initialize chain
+    param_rf (dict): Dictionary containing parameters needed to initialize random field
+    param_run (dict): Dictionary containing parameters needed to run chain
+
+    Returns
+    -------
+    result (tuple): A tuple containing the results of the run
+
+    '''
 
     # Suppress initialization prints from workers
     old_stdout = sys.stdout
@@ -88,7 +104,7 @@ def lsc_run_wrapper(param_chain, param_rf, param_run):
     chain = MCMC.init_lsc_chain_by_instance(param_chain)
     rf1 = MCMC.initiate_RF_by_instance(param_rf)
 
-    # Restore stdout
+    # Restore stdout after initialization
     sys.stdout.close()
     sys.stdout = old_stdout
 
@@ -98,15 +114,15 @@ def lsc_run_wrapper(param_chain, param_rf, param_run):
     n_iter = param_run['n_iter']
     seed_folder = Path(output_path) / f'{str(seed)[:6]}'
 
-    # Check for existing bed files
+    # Check for existing bed files (to resume progress)
     existing_beds = list(seed_folder.glob('bed_*.txt'))
     cumulative_iters = 0
     previous_results = None
     files_to_delete = []
 
+    # Prepare to merge/concatenate existing files with new results
     if existing_beds:
-        # Should only be one bed file since we delete after combining
-        bed_file = existing_beds[0]
+        bed_file = existing_beds[0] # Existing bed file
         
         # Extract iteration count from filename
         filename = bed_file.stem  # Gets 'bed_100k' from 'bed_100k.txt'
@@ -146,6 +162,7 @@ def lsc_run_wrapper(param_chain, param_rf, param_run):
     chain.tqdm_position = param_run.get('tqdm_position', 0)
     chain.seed = param_run.get('seed', 'Unknown')
 
+    # Run the chain
     result = chain.run(
         n_iter=param_run['n_iter'], 
         RF=rf1, 
@@ -187,8 +204,9 @@ def lsc_run_wrapper(param_chain, param_rf, param_run):
             file_path.unlink()
 
     return result
+
     
-def smallScaleChain_mp(n_chains,n_workers,smallScaleChain,initial_beds,rng_seeds,n_iters):
+def smallScaleChain_mp(n_chains, n_workers, smallScaleChain, initial_beds, ssc_rng_seeds, lsc_rng_seed, n_iters, output_path='./Data/output'):
     '''
     function to run multiple small scale chain using multiprocessing
 
@@ -198,102 +216,172 @@ def smallScaleChain_mp(n_chains,n_workers,smallScaleChain,initial_beds,rng_seeds
     n_workers (int): the number of processes the multiprocessing function create. Must be less than the number of CPUs you have
     smallScaleChain (MCMC.chain_sgs): an existing small scale chain that has already been set-up
     initial_beds (list): a list of subglacial topography (each of which are a 2D numpy array) used to initialize each chain
-    rng_seeds (list): a list of int used to initialize the random number generator of each chain
+    ssc_rng_seeds (list): a list of int used to initialize the random number generator of each chain
+    lsc_rng_seed (int): rng seed for the parent lsc that will be used to find where to save results
     n_iters (int): a list of number of iterations runned for each chain
-    output_path (str): Path to the folder where the users wants to save results
 
     Returns
     -------
     result: a list of results from all the chains runned.
 
     '''
-    base_path = Path(output_path)
-    ls_chain_path = base_path / 'LargeScaleChain'
-
     # Clear the console for the progress bars
     os.system('cls' if os.name == 'nt' else 'clear')
-    
-    tic = time.time()
-    
-    params = []
-    example_chain = smallScaleChain.__dict__ #retrive parameters from the existing chain
 
-    # modify some of the parameters based on the input rng_seeds, initial_beds, and n_iters
-    for i in range(n_chains):   
+    tic = time.time()
+
+    params = []
+    # retrive parameters from the existing chain
+    example_chain = smallScaleChain.__dict__
+
+    # modify some of the parameters based on the input ssc_rng_seeds, initial_beds, and n_iters
+    for i in range(n_chains):
         chain_param = deepcopy(example_chain)
-        chain_param['rng_seed'] = rng_seeds[i]
+        chain_param['rng_seed'] = ssc_rng_seeds[i]
         chain_param['initial_bed'] = initial_beds[i]
 
         run_param = {}
         run_param['n_iter'] = n_iters[i]
-        run_param['only_save_last_bed']=True # some display parameters are fixed.
-        run_param['info_per_iter']=1000
-        run_param['plot']=False
-        run_param['progress_bar']=False
+        # some display parameters are fixed.
+        run_param['only_save_last_bed'] = True
+        run_param['info_per_iter'] = 10
+        run_param['plot'] = False
+        run_param['progress_bar'] = False
         run_param['chain_id'] = i
         run_param['tqdm_position'] = i + 2 # 2 lines for header
-        run_param['seed'] = rng_seeds[i]
-        run_param['output_path'] = str(ss_chain_path)
-
-        params.append([deepcopy(chain_param),deepcopy(run_param)])
+        run_param['ssc_seed'] = ssc_rng_seeds[i]
+        run_param['lsc_seed'] = lsc_rng_seed
+        run_param['output_path'] = str(Path(output_path) / 'LargeScaleChain' / str(lsc_rng_seed)[:6] / 'SmallScaleChain')
+        params.append([deepcopy(chain_param), deepcopy(run_param)])
 
     # Print header and reserve space for progress bars
     print('Running MCMC chains...')
     print('\n' * (n_chains + 1))
     sys.stdout.flush() # force output into the terminal
-    
+
     # the multiprocessing step
     with mp.Pool(n_workers) as pool:
         result = pool.starmap(msc_run_wrapper, params)
 
-    # Move cursor below chain outputs before printing total time
+    # Move cursor below chain outputs before printing the timing
     print('\n' * (n_chains + 2))
-    
+
     toc = time.time()
-    print(f'Completed in {toc-tic:.2f} seconds')
-    
+    print(f'Completed in {toc-tic} seconds')
+
     return result
-    
-def msc_run_wrapper(param_chain, param_rf, param_run):
-    # a function used to initialize chain by input parameters and run the chains
+
+
+def msc_run_wrapper(param_chain, param_run):
+    '''
+    A function used to initialize chain by input parameters and run the chains
+
+    Parameters
+    ----------
+    param_chain (dict): Dictionary containing parameters needed to initialize chain
+    param_rf (dict): Dictionary containing parameters needed to initialize random field
+    param_run (dict): Dictionary containing parameters needed to run chain
+
+    Returns
+    -------
+    result (tuple): A tuple containing the results of the run
+
+    '''
 
     # Suppress initialization prints from workers
     old_stdout = sys.stdout
     sys.stdout = open(os.devnull, 'w')
-    
+
     chain = MCMC.init_msc_chain_by_instance(param_chain)
 
-    # Restore stdout
+    # Restore stdout after initialization
     sys.stdout.close()
     sys.stdout = old_stdout
+
+    # Setup output path
+    output_path = param_run.get(
+        'output_path', 
+        './Data/LargeScaleChain/'+str(param_run['lsc_seed'])[:6]+'/SmallScaleChain'
+        )
+    seed = param_run['ssc_seed']
+    n_iter = param_run['n_iter']
+    seed_folder = Path(output_path) / f'{str(seed)[:6]}'
+
+    # Check for existing bed files (to resume progress)
+    existing_beds = list(seed_folder.glob('bed_*.txt'))
+    cumulative_iters = 0
+    previous_results = None
+    files_to_delete = []
+
+    # Prepare to merge/concatenate existing files with new reults
+    if existing_beds:
+        bed_file = existing_beds[0] # Existing bed file
+
+        # Extract iteration count from filename
+        filename = bed_file.stem # Gets 'bed_100k' from 'bed_100k.txt'
+        iter_str = filename.split('_')[1].replace('k', '')
+        iter_count = int(iter_str)
+        cumulative_iters = iter_count * 1000 # Convert back to actual iterations
+
+        # Load the most recent bed file
+        most_recent_bed = np.loadtxt(bed_file)
+
+        # Update the chain's intiial bed
+        chain.initial_bed = most_recent_bed
+
+        # Load all previous result files
+        previous_results = {
+            'loss_mc': np.loadtxt(seed_folder / f'loss_mc_{iter_count}k.txt'),
+            'loss_data': np.loadtxt(seed_folder / f'loss_data_{iter_count}k.txt'),
+            'loss': np.loadtxt(seed_folder / f'loss_{iter_count}k.txt'),
+            'steps': np.loadtxt(seed_folder / f'steps_{iter_count}k.txt'),
+            'resampled_times': np.loadtxt(seed_folder / f'resampled_times_{iter_count}k.txt'),
+            'blocks_used': np.loadtxt(seed_folder / f'blocks_used_{iter_count}k.txt')
+        }
+
+        # Mark files for deletion
+        files_to_delete = [
+            seed_folder / f'bed_{iter_count}k.txt',
+            seed_folder / f'loss_mc_{iter_count}k.txt',
+            seed_folder / f'loss_data_{iter_count}k.txt',
+            seed_folder / f'loss_{iter_count}k.txt',
+            seed_folder / f'steps_{iter_count}k.txt',
+            seed_folder / f'resampled_times_{iter_count}k.txt',
+            seed_folder / f'blocks_used_{iter_count}k.txt'
+        ]
 
     # Store positioning info
     chain.chain_id = param_run.get('chain_id', 'Unknown')
     chain.tqdm_position = param_run.get('tqdm_position', 0)
-    chain.seed = param_run.get('seed', 'Unknown')
+    chain.seed = param_run.get('ssc_seed', 'Unkown')
 
+    # Run the chain
     result = chain.run(
         n_iter=param_run['n_iter'], 
-        only_save_last_bed=param_run['only_save_last_bed'], 
+        only_save_last_bed=param_run['only_save_last_bed'],
         info_per_iter=param_run['info_per_iter'], 
         plot=param_run['plot'], 
         progress_bar=param_run['progress_bar']
         )
     
-    # Save reults
-    output_path = param_run.get('output_path', './Data/SmallScaleChain')
-    seed = param_run['seed']
-    n_iter = param_run['n_iter']
-
-    # Create seed-specific folder
-    seed_folder = Path(output_path) / f'{str(seed)[:6]}'
-    seed_folder.mkdir(parents=True, exist_ok=True)
-
     # Unpack results
     beds, loss_mc, loss_data, loss, steps, resampled_times, blocks_used = result
 
-    # Save all outputs
-    iteration_label = f'{n_iter // 1000}k'
+    # Combine with previous results if they exist
+    if previous_results is not None:
+        # Append new results to previous results
+        loss_mc = np.concatenate([previous_results['loss_mc'], loss_mc])
+        loss_data = np.concatenate([previous_results['loss_data'], loss_data])
+        loss = np.concatenate([previous_results['loss'], loss])
+        steps = np.concatenate([previous_results['steps'], steps])
+        resampled_times = previous_results['resampled_times'] + resampled_times
+        blocks_used = np.vstack([previous_results['blocks_used'], blocks_used])
+
+    # Calculate new cumulative iteration count
+    cumulative_iters += n_iter
+    iteration_label = f'{cumulative_iters // 1000}k'
+
+    # Save all outputs with updated iteration label
     np.savetxt(seed_folder / f'bed_{iteration_label}.txt', beds)
     np.savetxt(seed_folder / f'loss_mc_{iteration_label}.txt', loss_mc)
     np.savetxt(seed_folder / f'loss_data_{iteration_label}.txt', loss_data)
@@ -302,12 +390,30 @@ def msc_run_wrapper(param_chain, param_rf, param_run):
     np.savetxt(seed_folder / f'resampled_times_{iteration_label}.txt', resampled_times)
     np.savetxt(seed_folder / f'blocks_used_{iteration_label}.txt', blocks_used)
 
+    # Delete old files after successfully saving new ones
+    for file_path in files_to_delete:
+        if file_path.exists():
+            file_path.unlink()
+
     return result
 
 if __name__=='__main__':
+    # Set file paths here
+    #NOTE use r string literals in case backslashes are used
+    glacier_data_path = Path(r'DenmanDataGridded.csv') 
+    sgs_bed_path = Path(r'sgs_bed_denman.txt')
+    data_weight_path = Path(r'data_weight_denman.txt')
+    seed_file_path = Path(r'../200_seeds.txt')
+    output_path = Path(r'./Data/Denman')
+
+    # Multiprocessing params
+    n_iter = 5000
+    offset_idx = 0 # Which seed to start from (0-9)
+    n_chains = 10
+    n_workers = 12
 
     # load compiled bed elevation measurements
-    df = pd.read_csv('./Data/KohlerPopeSmith.csv') #FIXME df = pd.read_csv('DenmanDataGridded.csv')
+    df = pd.read_csv(glacier_data_path)
     
     rng_seed = 23198104
     
@@ -363,10 +469,9 @@ if __name__=='__main__':
     coords = df_sampled[['x','y']].values
     values = df_sampled['Nbed']
 
-    '''FIXME    
     maxlag = 80000      # maximum range distance
     n_lags = 60         # num of bins (try decreasing if this is taking too long)
-    
+
     # compute variogram
     V1 = skg.Variogram(coords, values, bin_func='even', 
                        n_lags=n_lags, maxlag=maxlag, normalize=False, 
@@ -379,11 +484,9 @@ if __name__=='__main__':
     # Notice: because we randomly drop out some data, the calculation of V1_p won't always obtain the same result
     # To ensure reproducibility of your work, please use a consistent set of V1_p throughout different chains
     V1_p = V1.parameters
-    '''
-    V1_p = [np.float64(38566.30452359015), np.float64(1.3915876949924022), np.float64(0.7156807016487273), 0]
     
     # load bed generated by Sequential Gaussian Simulation
-    sgs_bed = np.loadtxt('./Data/sgs_bed_kps.txt') #FIXME sgs_bed = np.loadtxt('sgs_bed_denman.txt')
+    sgs_bed = np.loadtxt(sgs_bed_path)
     thickness = bedmap_surf - sgs_bed
     sgs_bed = np.where((thickness<=0)&(bedmap_mask==1), bedmap_surf-1, sgs_bed)
     
@@ -440,27 +543,19 @@ if __name__=='__main__':
     # np.savetxt('data_weight_denman.txt', largeScaleChain.crf_data_weight)
     
     # load and set the data weight for the chain
-    largeScaleChain.crf_data_weight = np.loadtxt('./Data/data_weight.txt') #FIXME largeScaleChain.crf_data_weight = np.loadtxt('data_weight_denman.txt')
+    largeScaleChain.crf_data_weight = np.loadtxt(data_weight_path)
     largeScaleChain.set_update_type('CRF_weight')
     
     largeScaleChain.set_random_generator(rng_seed = rng_seed)
     
-    n_iter = 5000
-
-    offset_idx = 0
-    n_chains = 10
-    n_workers = 12
-    
     initial_beds = np.array([sgs_bed] * n_chains) # np.repeat(sgs_bed, n_chains)
     
-    with open(Path('./Data/200_seeds.txt'), 'r') as f: #FIXME with open(Path('../200_seeds.txt'), 'r') as f:
+    with open(Path(seed_file_path), 'r') as f:
         lines = f.readlines()
     
     rng_seeds = []
     for line in lines:
         rng_seeds.append(int(line.strip()))
-
-    output_path = Path('./Data/output') #NOTE set output path here
 
     # Create output directory for all results
     for i in range(0, len(rng_seeds)):

@@ -1367,7 +1367,7 @@ class chain_crf(chain):
                     'acceptance rate'   :   f'{np.sum(step_cache)/(i+1):.6f}'
                 })
             else:
-                if i%info_per_iter == 0:
+                if i%info_per_iter == 0 or i == 1 or i == n_iter - 1:
                     move_cursor_to_line(output_line)
                     clear_line()
                     progress = i / (n_iter - 1) * 100
@@ -1787,7 +1787,7 @@ class chain_sgs(chain):
                     'acceptance rate'   :   f'{np.sum(step_cache)/(i+1):.6f}'
                 })
             else:
-                if i%info_per_iter == 0:
+                if i%info_per_iter == 0 or i == 1 or i == n_iter - 1:
                     move_cursor_to_line(output_line)
                     clear_line()
                     progress = i / (n_iter - 1) * 100

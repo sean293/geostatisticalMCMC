@@ -368,8 +368,10 @@ def init_lsc_chain_by_instance(param_dict):
     chain.block_type = p['block_type']
     chain.crf_data_weight = p['crf_data_weight']
     chain.rng = np.random.default_rng(seed=p['rng_seed'])
+    chain.rng_seed = p['rng_seed']
     chain.mc_region_mask = p['mc_region_mask']
     #chain.data_region_mask = p['data_region_mask']
+    chain.sample_loc = deepcopy(p['sample_loc'])
         
     return chain
 
@@ -391,6 +393,7 @@ def initiate_RF_by_instance(param_dict):
     rf.max_dist = p['max_dist']
     rf.resolution = p['resolution']
     rf.edge_masks = p['edge_masks']
+    rf.rng = np.random.default_rng(seed=p['rng_seed'])
     return rf
 
 # helper function used to initiate a new small scale chain 
@@ -419,6 +422,8 @@ def init_msc_chain_by_instance(param_dict):
     chain.vario_param = deepcopy(p['vario_param'])
     chain.sgs_param = deepcopy(p['sgs_param'])
     chain.rng = np.random.default_rng(seed=p['rng_seed'])
+    chain.rng_seed = p['rng_seed']
+    chain.sample_loc = deepcopy(p['sample_loc'])
     #chain.data_region_mask = p['data_region_mask']
         
     return chain
@@ -861,6 +866,7 @@ class chain:
         self.grounded_ice_mask = grounded_ice_mask
         self.resolution = resolution
         self.loss_function_list = []
+        self.sample_loc = None
         
         if (initial_bed.shape!=surf.shape) or (initial_bed.shape!=velx.shape) or (initial_bed.shape!=vely.shape) or (initial_bed.shape!=dhdt.shape) or (initial_bed.shape!=smb.shape) or (initial_bed.shape!=cond_bed.shape) or (initial_bed.shape!=data_mask.shape):
             raise Exception('the shape of bed, surf, velx, vely, dhdt, smb, radar_bed, data_mask need to be same')
@@ -1080,10 +1086,26 @@ class chain:
             rng = np.random.default_rng(seed=rng_seed)
         elif isinstance(rng_seed, np.random._generator.Generator):
             rng = rng_seed
+            chain.seed = rng_seed
         else:
             raise ValueError('Seed should be an integer, a NumPy random Generator, or None')
             
         self.rng = rng
+        
+    def set_sample_points_locations(self, loc):
+        '''
+        Set the x and y coordinates, where the bed elevation will be recorded and returned by MCMC chain
+
+        Parameters
+        ----------
+        loc (np.ndarray) : a 2D array of shape (n, 2) of x and y coordinates, where the bed elevation values through the chain is collected. 
+
+        Returns
+        -------
+        None.
+
+        '''
+        self.sample_loc = loc
       
 class chain_crf(chain):
     """
@@ -1160,7 +1182,6 @@ class chain_crf(chain):
         """
         # synchronize the random generator with RF object
         rng = self.rng
-        RF.rng = rng
         
         if not isinstance(RF, RandField):
             raise TypeError('The arugment "RF" has to be an object of the class RandField')
@@ -1174,6 +1195,18 @@ class chain_crf(chain):
             bed_cache = np.zeros((n_iter, self.xx.shape[0], self.xx.shape[1]))
         blocks_cache = np.full((n_iter, 4), np.nan)
         resampled_times = np.zeros(self.xx.shape)
+        
+        # if the user request to return bed elevation in some sampling locations
+        if not (self.sample_loc is None):
+            sample_values = np.zeros((self.sample_loc.shape[0], n_iter))
+            
+            # convert sample_loc from x and y locations to i and j indexes
+            sample_loc_ij = np.zeros(self.sample_loc.shape, dtype=np.int16)
+            for k in range(self.sample_loc.shape[0]):
+                sample_i,sample_j = np.where((self.xx == self.sample_loc[k,0]) & (self.yy == self.sample_loc[k,1]))
+                sample_loc_ij[k,:] = [int(sample_i[0]), int(sample_j[0])]
+                
+            sample_values[:,0] = self.initial_bed[sample_loc_ij[:,0],sample_loc_ij[:,1]]
         
         bed_c = self.initial_bed
 
@@ -1228,7 +1261,7 @@ class chain_crf(chain):
             iterator = tqdm(range(1, n_iter),
                             desc=f'Chain {chain_id} | Seed {seed}',
                             position=tqdm_position,
-                            leave=True) 
+                            leave=True)
         else:
             iterator = range(1,n_iter)
 
@@ -1355,6 +1388,9 @@ class chain_crf(chain):
             
             if not only_save_last_bed:
                 bed_cache[i,:,:] = bed_c
+                
+            if not (self.sample_loc is None):
+                sample_values[:,i] = bed_c[sample_loc_ij[:,0],sample_loc_ij[:,1]]
 
             if progress_bar:
                 # Update tqdm progress bar
@@ -1401,9 +1437,15 @@ class chain_crf(chain):
                     display_handle.update(fig)
                 
         if not only_save_last_bed:
-            return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
+            if not (self.sample_loc is None):
+                return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache, sample_values
+            else:
+                return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
         else:
-            return bed_c, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
+            if not (self.sample_loc is None):
+                return bed_c, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache, sample_values
+            else:
+                return bed_c, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
 
 class chain_sgs(chain):
     """
@@ -1591,6 +1633,18 @@ class chain_sgs(chain):
             bed_cache = np.zeros((n_iter, rows, cols))
         blocks_cache = np.full((n_iter, 4), np.nan)
         resampled_times = np.zeros(self.xx.shape)
+        
+        # if the user request to return bed elevation in some sampling locations
+        if not (self.sample_loc is None):
+            sample_values = np.zeros((self.sample_loc.shape[0], n_iter))
+            
+            # convert sample_loc from x and y locations to i and j indexes
+            sample_loc_ij = np.zeros(self.sample_loc.shape, dtype=np.int16)
+            for k in range(self.sample_loc.shape[0]):
+                sample_i,sample_j = np.where((self.xx == self.sample_loc[k,0]) & (self.yy == self.sample_loc[k,1]))
+                sample_loc_ij[k,:] = [int(sample_i[0]), int(sample_j[0])]
+                
+            sample_values[:,0] = self.initial_bed[sample_loc_ij[:,0],sample_loc_ij[:,1]]
 
         if self.detrend_map:
             bed_c = (self.initial_bed - self.trend).copy()
@@ -1681,7 +1735,7 @@ class chain_sgs(chain):
         if progress_bar == True:
             chain_id = getattr(self, 'chain_id', 0)
             seed = getattr(self, 'seed', 'Unknown')
-            tqdm_position = getattr(self, 'tqdm_position')
+            tqdm_position = getattr(self, 'tqdm_position', 0)
 
             iterator = tqdm(range(1,n_iter),
                             desc=f'Chain {chain_id} | Seed {seed}',
@@ -1775,6 +1829,9 @@ class chain_sgs(chain):
                     bed_cache[i,:,:] = bed_c + self.trend
                 else:
                     bed_cache[i,:,:] = bed_c
+                    
+            if not (self.sample_loc is None):
+                sample_values[:,i] = bed_c[sample_loc_ij[:,0],sample_loc_ij[:,1]]
 
             if progress_bar:
                 # Update tqdm progress bar
@@ -1826,6 +1883,12 @@ class chain_sgs(chain):
             last_bed = bed_c
     
         if not only_save_last_bed:
-            return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
+            if not (self.sample_loc is None):
+                return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache, sample_values
+            else:
+                return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
         else:
-            return last_bed, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache
+            if not (self.sample_loc is None):
+                return bed_cache, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache, sample_values
+            else:
+                return last_bed, loss_mc_cache, loss_data_cache, loss_cache, step_cache, resampled_times, blocks_cache

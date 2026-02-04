@@ -13,6 +13,8 @@ from pathlib import Path
 import os
 import sys
 import scipy as sp
+import json
+import psutil
 
 def largeScaleChain_mp(n_chains,n_workers,largeScaleChain,rf,initial_beds,rng_seeds,n_iters,output_path='./Data/output'):
     '''
@@ -405,17 +407,17 @@ if __name__ == '__main__':
     seed_file_path = Path(r'../200_seeds.txt')
     output_path = Path(r'./Data/Denman')
 
-    n_iter = 100
+    n_iter = 1000
     lsc_seed_idx = 0 # Which lsc are we starting from?
     ssc_start_idx = 0 # Min of 0
     ssc_end_idx = 5 # Max of 19
     #NOTE n_chains is calculated by subtracting the starting index from the ending index
-    n_workers = 12
+    n_workers = psutil.cpu_count(logical=False)-1
 
     # load compiled bed elevation measurements
     df = pd.read_csv(glacier_data_path)
 
-    rng_seed = 23198104
+    rng_seed = 0
 
     # create a grid of x and y coordinates
     x_uniq = np.unique(df.x)
@@ -473,6 +475,7 @@ if __name__ == '__main__':
 
     lsc_path = output_path / 'LargeScaleChain' / str(lsc_rng_seed)[:6]
 
+    # TODO: This needs to be different
     initial_bed = np.loadtxt(list(lsc_path.glob('bed_*.txt'))[0])
     thickness = bedmap_surf - initial_bed
     # make sure every topography in the grounded ice region is below ice surface
@@ -555,14 +558,30 @@ if __name__ == '__main__':
     # set up the random generator used in the chain
     # in multiprocessing, the random generator in here will be replaced by rng_seeds later
     smallScaleChain.set_random_generator(rng_seed=rng_seed)
+    
+    
+    # Create output for the small scale chain
+    ss_chain_folder = lsc_path / 'SmallScaleChain'
+    ss_chain_folder.mkdir(parents=True, exist_ok=True)
+
+    # Create small scale chain folders specific for the current index
+    for j in range(n_chains):
+        ss_seed = ssc_rng_seeds[j]
+        ss_seed_folder = ss_chain_folder / f'{str(ss_seed)[:6]}'
+        ss_seed_folder.mkdir(parents=True, exist_ok=True)
+    
 
     # fill in a list of initial_beds to be used for each chain
     # the list length should be equal to number of chains
-    initial_beds = np.array([initial_bed] * n_chains) # np.repeart(initial_bed, n_chains)
+    initial_beds = []
+    bed_iter_toload = ['5k', '10k', '20k', '30k', '40k']
+    for i in range(n_chains):
+        iter_load = bed_iter_toload[i]
+        lsc_bed = np.loadtxt(lsc_path / f'bed_{iter_load}.txt')
+        initial_beds.append(lsc_bed)
+    #initial_beds = np.array([initial_bed] * n_chains) # np.repeart(initial_bed, n_chains)
 
     # number of iterations used to run each chain
     n_iters = [n_iter]*n_chains
 
-    result = smallScaleChain_mp(n_chains, n_workers, smallScaleChain, initial_beds, ssc_rng_seeds, lsc_rng_seed, n_iters)
-
-    # beds, loss_mc, loss_data, loss, steps, resampled_times, blocks_used  = smallScaleChain.run(n_iter=100, info_per_iter=10, only_save_last_bed=False)
+    result = smallScaleChain_mp(n_chains, n_workers, smallScaleChain, initial_beds, ssc_rng_seeds, lsc_rng_seed, n_iters, output_path = output_path)

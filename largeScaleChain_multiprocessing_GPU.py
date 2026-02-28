@@ -16,7 +16,6 @@ import scipy as sp
 import json
 import psutil
 import torch
-import config
 
 
 def largeScaleChain_mp(n_chains,n_workers,largeScaleChain,rf,initial_beds,rng_seeds,n_iters,output_path='./Data/output'):
@@ -464,9 +463,21 @@ if __name__=='__main__':
     seed_file_path = Path(r'./data/200_seeds.txt')
     output_path = Path(r'./data/bindshadler_macayeal/')
 
+    config = {
+        'resolution':500,
+        'T3_xmin_block':50,
+        'T3_xmax_block':80,
+        'T3_ymin_block':50,
+        'T3_ymax_block':80,
+        'range_max_x':50e3,
+        'range_max_y':50e3,
+        'scale_min':50,
+        'scale_max':150,
+        'sigma':5
+    }
 
     # Multiprocessing params
-    n_iter = 3000000
+    n_iter = 5000
     offset_idx = 0 # Which seed to start from (0-9)
     n_chains = 10
     n_workers = psutil.cpu_count(logical=False)-1
@@ -488,7 +499,7 @@ if __name__=='__main__':
     cols = len(x_uniq)
     rows = len(y_uniq)
     
-    resolution = config.resolution
+    resolution = config['resolution']
 
     
     xx, yy = np.meshgrid(x_uniq, y_uniq)
@@ -560,16 +571,16 @@ if __name__=='__main__':
     mc_res_bm = Topography.get_mass_conservation_residual(bedmachine_bed,bedmap_surf,velx,vely,dhdt,smb,resolution)
     
     # in multiprocessing, we choose to only use mass flux residual loss in squared sum (Gaussian distribution)
-    largeScaleChain.set_loss_type(sigma_mc=config.sigma3, massConvInRegion=True)
+    largeScaleChain.set_loss_type(sigma_mc=config['sigma'], massConvInRegion=True)
     
     #range_max and range_min changes topographies features' lateral scale
     #by default, I set range_max to variogram range
-    range_max_x = 50e3 #in terms of meters in lateral dimension, regardless of resolution of the map
-    range_max_y = 50e3
+    range_max_x = config['range_max_x'] #in terms of meters in lateral dimension, regardless of resolution of the map
+    range_max_y = config['range_max_y']
     range_min_x = 10e3
     range_min_y = 10e3
-    scale_min = 50 #in terms of meters in vertical dimension, how much you want to multiply the perturbation by
-    scale_max = 150
+    scale_min = config['scale_min'] #in terms of meters in vertical dimension, how much you want to multiply the perturbation by
+    scale_max = config['scale_max']
     nugget_max = 0
     random_field_model = 'Matern' # currently only supporting 'Gaussian' or 'Exponential'
     isotropic = True
@@ -578,10 +589,10 @@ if __name__=='__main__':
     # initialize a RandField instance to be used for all large scale chains
     rf1 = MCMC_gpu.RandField(range_min_x, range_max_x, range_min_y, range_max_y, scale_min, scale_max, nugget_max, random_field_model, isotropic, smoothness = smoothness)
     
-    min_block_x = config.T3_xmin_block
-    max_block_x = config.T3_xmax_block
-    min_block_y = config.T3_ymin_block
-    max_block_y = config.T3_ymax_block
+    min_block_x = config['T3_xmin_block']
+    max_block_x = config['T3_xmax_block']
+    min_block_y = config['T3_ymin_block']
+    max_block_y = config['T3_ymax_block']
 
     rf1.set_block_sizes(min_block_x, max_block_x, min_block_y, max_block_y)
     
@@ -611,7 +622,8 @@ if __name__=='__main__':
     
     initial_beds = []
     for i in range(n_chains):
-        sgs_bed = np.loadtxt(r'sgs_beds/sgs_'+str(i)+'_bindshadler_macayeal.txt')
+        #sgs_bed = np.loadtxt(r'sgs_beds/sgs_'+str(i)+'_bindshadler_macayeal.txt')
+        sgs_bed = np.loadtxt(r'sgs_bed_denman.txt')
         initial_beds.append(sgs_bed)
     #initial_beds = np.array([sgs_bed] * n_chains) # np.repeat(sgs_bed, n_chains)
     

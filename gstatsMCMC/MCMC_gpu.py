@@ -8,6 +8,37 @@ elif torch.backends.mps.is_available():
     device = torch.device("mps")
 else:
     device = torch.device("cpu")
+    
+""" compute the mass conservation residual from topography using pytorch and GPU
+
+Args:
+    bed (2D numpy array of float): the elevation of the subglacial topography, in units of meters
+    surf (2D numpy array of float): the elevation of the ice surface, in unit of meters
+    velx (2D numpy array of float): velocity in the x-direction, in unit of meters per year
+    vely (2D numpy array of float): velocity in the y-direction, in unit of meters per year
+    dhdt (2D numpy array of float): rate of changes of surface elevation, in unit of meters per year
+    smb (2D numpy array of float): annual surface mass balance, in unit of ice-equivalent meters per year
+    resolution (int): resolution of the grid.
+Returns:
+    res: mass conservation residual given the input parameters
+    
+Note: need to consider uncertainties due to 
+1. firn thickness - ice-equivalent conversion error
+2. error due to unmatched data collection time
+3. numerical error due to the np.gradient function
+4. error in all these day and correlation in the error
+"""
+def get_mass_conservation_residual_tensor(bed: torch.Tensor, surf: torch.Tensor, velx: torch.Tensor, vely: torch.Tensor, dhdt: torch.Tensor, smb: torch.Tensor, resolution: torch.Tensor):    
+    """ Accepts only Torch.Tensor"""
+    thick = surf - bed
+
+    # torch.gradient returns a list; axis 1 = x (columns), axis 0 = y (rows)
+    # spacing argument corresponds to the physical resolution
+    (dx_t,) = torch.gradient(velx * thick, spacing=(float(resolution),), dim=1)
+    (dy_t,) = torch.gradient(vely * thick, spacing=(float(resolution),), dim=0)
+
+    res_t: torch.Tensor = dx_t + dy_t + dhdt - smb
+    return res_t
 
 def spectral_synthesis_field_torch(RF, shape, res=1.0, device=None, dtype=torch.float32):
     """
@@ -311,7 +342,7 @@ class chain_crf_gpu(chain_crf):
         
 
         # Initialize loss
-        mc_res = Topography.get_mass_conservation_residual_tensor( 
+        mc_res = get_mass_conservation_residual_tensor( 
             bed_c, self.surf, self.velx, self.vely, self.dhdt, self.smb, self.resolution
             ) # -> (H, W) tensor
         
@@ -425,7 +456,7 @@ class chain_crf_gpu(chain_crf):
             c_ymin = max(0, bymin - pad)
             c_ymax = min(W, bymax + pad)
 
-            local_mc_res = Topography.get_mass_conservation_residual_tensor(
+            local_mc_res = get_mass_conservation_residual_tensor(
                     bed_next[c_xmin:c_xmax, c_ymin:c_ymax],
                     self.surf [c_xmin:c_xmax, c_ymin:c_ymax], 
                     self.velx [c_xmin:c_xmax, c_ymin:c_ymax],

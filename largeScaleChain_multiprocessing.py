@@ -451,11 +451,7 @@ def msc_run_wrapper(param_chain, param_run):
 if __name__=='__main__':
     # Set file paths here
     #NOTE use r string literals in case backslashes are used
-    glacier_data_path = Path(r'DenmanDataGridded.csv') 
-    sgs_bed_path = Path(r'sgs_bed_denman.txt')
-    data_weight_path = Path(r'data_weight_denman.txt')
-    seed_file_path = Path(r'../200_seeds.txt')
-    output_path = Path(r'./Data/Denman')
+
 
     # Multiprocessing params
     n_iter = 5000
@@ -601,7 +597,8 @@ if __name__=='__main__':
     
     initial_beds = []
     for i in range(n_chains):
-        sgs_bed = np.loadtxt('Denman_sgs_bed_'+str(i)+'.txt')
+        #sgs_bed = np.loadtxt('Denman_sgs_bed_'+str(i)+'.txt')
+        sgs_bed = np.loadtxt('sgs_bed_denman.txt')
         initial_beds.append(sgs_bed)
     #initial_beds = np.array([sgs_bed] * n_chains) # np.repeat(sgs_bed, n_chains)
     

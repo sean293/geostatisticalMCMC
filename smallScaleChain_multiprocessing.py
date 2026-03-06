@@ -437,37 +437,43 @@ def msc_run_wrapper(param_chain, param_run):
 
 
 if __name__ == '__main__':
-
     # Set file paths here
-    glacier_data_path = Path(r'./Data/KohlerPopeSmith.csv')
-    sgs_bed_path = Path(r'./Data/sgs_bed_kps.txt')
-    data_weight_path = Path(r'./Data/data_weight.txt')
-    seed_file_path = Path(r'./Data/200_seeds.txt')
-    output_path = Path(r'./Data/KohlerPopeSmith')
+    #NOTE use r string literals in case backslashes are used
+    glacier_data_path = Path(r'DenmanDataGridded.csv')
+    seed_file_path = Path(r'../200_seeds.txt')
+    output_path = Path(r'./Data/Denman')
 
-    # Index range of large scale chains to run SSCs for (0-9 inclusive)
+    n_iter = 1000
+
+    # Index range of LSCs to run SSCs for (0-9 inclusive)
     lsc_starting_idx = 0
-    lsc_ending_idx = 2
+    lsc_ending_idx = 0
 
-    n_ssc_per_lsc = 10
-    n_lsc_total = 10
-    n_iter = 5000
-    n_workers = psutil.cpu_count(logical=False) - 1
+    #NOTE n_chains is calculated by subtracting the starting index from the ending index
+    n_workers = psutil.cpu_count(logical=False)-1
 
-    # Load glacier data
+    # load compiled bed elevation measurements
     df = pd.read_csv(glacier_data_path)
+
     rng_seed = 0
 
-    # Create grid
+    # create a grid of x and y coordinates
     x_uniq = np.unique(df.x)
     y_uniq = np.unique(df.y)
-    xmin, xmax = np.min(x_uniq), np.max(x_uniq)
-    ymin, ymax = np.min(y_uniq), np.max(y_uniq)
-    cols, rows = len(x_uniq), len(y_uniq)
+
+    xmin = np.min(x_uniq)
+    xmax = np.max(x_uniq)
+    ymin = np.min(y_uniq)
+    ymax = np.max(y_uniq)
+
+    cols = len(x_uniq)
+    rows = len(y_uniq)
+
     resolution = 500
+
     xx, yy = np.meshgrid(x_uniq, y_uniq)
 
-    # Load other data
+    # load other data
     dhdt = df['dhdt'].values.reshape(xx.shape)
     smb = df['smb'].values.reshape(xx.shape)
     velx = df['velx'].values.reshape(xx.shape)
@@ -477,25 +483,30 @@ if __name__ == '__main__':
     bedmap_surf = df['bedmap_surf'].values.reshape(xx.shape)
     highvel_mask = df['highvel_mask'].values.reshape(xx.shape)
     bedmap_bed = df['bedmap_bed'].values.reshape(xx.shape)
+
+    # notice that this didn't recover bedmachine bed for ocean bathymetry or sub-ice-shelf bathymetry
     bedmachine_bed = bedmap_surf - bedmachine_thickness
 
-    # Create conditioning data
-    cond_bed = np.where(bedmap_mask == 1, df['bed'].values.reshape(xx.shape), bedmap_bed)
+    # create conditioning data
+    # bed elevation measurement in grounded ice region, and bedmachine bed topography elsewhere
+    cond_bed = np.where(
+        bedmap_mask == 1, df['bed'].values.reshape(xx.shape), bedmap_bed)
     df['cond_bed'] = cond_bed.flatten()
+
+    # create a mask of conditioning data
     data_mask = ~np.isnan(cond_bed)
-    grounded_ice_mask = (bedmap_mask == 1)
 
     # Read all seeds
     with open(seed_file_path, 'r') as f:
         rng_seeds = [int(line.strip()) for line in f.readlines()]
 
-    lsc_indices = range(lsc_starting_idx, lsc_ending_idx + 1)
+    lsc_indices = range(lsc_starting_idx, lsc_ending_idx+1)
     n_lsc_selected = len(lsc_indices)
-    n_ssc_total = n_lsc_selected * n_ssc_per_lsc
+    n_ssc_total = n_lsc_selected * 10 # 10 SSC per LSC
 
     # Build flat lists across all selected LSCs
     initial_beds = []
-    ssc_seeds_flat = []
+    ssc_seeds = []
     lsc_seed_map = []
     lsc_iter_map = []
 
@@ -509,14 +520,19 @@ if __name__ == '__main__':
         )
 
         ssc_seeds_for_lsc = rng_seeds[
-            n_lsc_total + lsc_idx * n_ssc_per_lsc :
-            n_lsc_total + lsc_idx * n_ssc_per_lsc + n_ssc_per_lsc
+            10 + lsc_idx * 10 :
+            10 + lsc_idx * 10 + 10
         ]
 
         for i, bed_file in enumerate(bed_files):
             lsc_iter = int(bed_file.stem.split('_')[1].replace('k', '')) * 1000
-            initial_beds.append(np.load(bed_file))
-            ssc_seeds_flat.append(ssc_seeds_for_lsc[i])
+            
+            one_initial_bed = np.load(bed_file) 
+            thickness = bedmap_surf - one_initial_bed
+            one_initial_bed = np.where((thickness <= 0) & (bedmap_mask == 1), bedmap_surf - 1, one_initial_bed)
+            initial_beds.append(one_initial_bed)
+            
+            ssc_seeds.append(ssc_seeds_for_lsc[i])
             lsc_seed_map.append(lsc_seed)
             lsc_iter_map.append(lsc_iter)
 
@@ -524,70 +540,91 @@ if __name__ == '__main__':
             ssc_folder.mkdir(parents=True, exist_ok=True)
             np.savetxt(ssc_folder / 'init_iter.txt', [lsc_iter], fmt='%d')
 
-    # -------------------------------------------------------------------------
-    # Use the first initial bed to set up the chain template (trend, variogram, 
-    # nst_trans). All SSCs share the same chain setup since they sample the same
-    # glacier -- only their starting bed and rng seed differ.
-    # -------------------------------------------------------------------------
-    rep_bed = initial_beds[0]
+    # TODO: This needs to be different
+    initial_bed = initial_beds[0]
+    thickness = bedmap_surf - initial_bed
+    # make sure every topography in the grounded ice region is below ice surface
+    initial_bed = np.where((thickness <= 0) & (
+        bedmap_mask == 1), bedmap_surf-1, initial_bed)
 
-    # Enforce ice thickness constraint on representative bed
-    thickness = bedmap_surf - rep_bed
-    rep_bed = np.where((thickness <= 0) & (bedmap_mask == 1), bedmap_surf - 1, rep_bed)
+    # sigma here control the smoothness of the trend
+    trend = sp.ndimage.gaussian_filter(initial_bed, sigma=10)
 
-    # Compute trend from representative bed
-    trend = sp.ndimage.gaussian_filter(rep_bed, sigma=10)
-
-    # Fit normal score transformation on the representative bed residuals
-    df['cond_bed_residual'] = df['cond_bed'].values - trend.flatten()
+    # normalize the conditioning bed data, saved to df['Nbed']
+    df['cond_bed_residual'] = df['cond_bed'].values-trend.flatten()
     data = df['cond_bed_residual'].values.reshape(-1, 1)
-    data_for_distribution = (rep_bed - trend).reshape(-1, 1)
-    nst_trans = QuantileTransformer(
-        n_quantiles=1000, output_distribution="normal",
-        subsample=None, random_state=rng_seed
-    ).fit(data_for_distribution)
+    # data used to evaluate the distribution. We use all data in the initial bed
+    data_for_distribution = (initial_bed - trend).reshape((-1, 1))
+    nst_trans = QuantileTransformer(n_quantiles=1000, output_distribution="normal",
+                                    subsample=None, random_state=rng_seed).fit(data_for_distribution)
+    # normalize all data in df['cond_bed_residual']
     transformed_data = nst_trans.transform(data)
     df['Nbed_residual'] = transformed_data
 
-    # Sample 50% of conditioning data for variogram fitting
+    # randomly drop out 50% of coordinates. Decrease this value if you have a lot of data and it takes a long time to run
     df_sampled = df.sample(frac=0.5, random_state=rng_seed)
     df_sampled = df_sampled[df_sampled["cond_bed_residual"].isnull() == False]
     df_sampled = df_sampled[df_sampled["bedmap_mask"] == 1]
 
+    # compute experimental (isotropic) variogram
     coords = df_sampled[['x', 'y']].values
     values = df_sampled['Nbed_residual']
-    maxlag = 20000
+
+    maxlag = 20000      # maximum range distance
+    # num of bins (try decreasing if this is taking too long)
     n_lags = 70
 
+    # compute variogram
     V1 = skg.Variogram(coords, values, bin_func='even',
                        n_lags=n_lags, maxlag=maxlag, normalize=False,
                        model='matern')
+
+    # extract variogram values
+    xdata = V1.bins
+    ydata = V1.experimental
+
+    # Notice: because we randomly drop out some data, the calculation of V1_p won't always obtain the same result
+    # To ensure reproducibility of your work, please use a consistent set of V1_p throughout different chains
     V1_p = V1.parameters
 
-    # Initialize small scale chain template
-    smallScaleChain = MCMC.chain_sgs(
-        xx, yy, rep_bed, bedmap_surf, velx, vely,
-        dhdt, smb, cond_bed, data_mask, grounded_ice_mask, resolution
-    )
+    grounded_ice_mask = (bedmap_mask == 1)
+
+    # initialize the small scale chain to be used as an example to initialize other small scale chain
+    smallScaleChain = MCMC.chain_sgs(xx, yy, initial_bed, bedmap_surf, velx,
+                                     vely, dhdt, smb, cond_bed, data_mask, grounded_ice_mask, resolution)
+    # set the update region
     smallScaleChain.set_update_region(True, highvel_mask)
+
+    # get mass flux residuals for bedmachien as a reference
+    mc_res_bm = Topography.get_mass_conservation_residual(
+        bedmachine_bed, bedmap_surf, velx, vely, dhdt, smb, resolution)
+
+    # in multiprocessing, we choose to only use mass flux residual loss in squared sum (Gaussian distribution)
     smallScaleChain.set_loss_type(sigma_mc=5, massConvInRegion=True)
-    smallScaleChain.set_block_sizes(5, 20, 5, 20)
+
+    # set up the block sizes
+    min_block_x = 5
+    max_block_x = 20
+    min_block_y = 5
+    max_block_y = 20
+    smallScaleChain.set_block_sizes(
+        min_block_x, max_block_x, min_block_y, max_block_y)
+
+    # set up normal score transformation, the trend, the variogram parameters, and the sgs paramters
     smallScaleChain.set_normal_transformation(nst_trans, do_transform=True)
+
     smallScaleChain.set_trend(trend=trend, detrend_map=True)
-    smallScaleChain.set_variogram('Matern', V1_p[0], V1_p[1], 0, isotropic=True, vario_smoothness=V1_p[2])
+
+    smallScaleChain.set_variogram(
+        'Matern', V1_p[0], V1_p[1], 0, isotropic=True, vario_smoothness=V1_p[2])
+
     smallScaleChain.set_sgs_param(48, 30e3, sgs_rand_dropout_on=False)
+
+    # set up the random generator used in the chain
+    # in multiprocessing, the random generator in here will be replaced by rng_seeds later
     smallScaleChain.set_random_generator(rng_seed=rng_seed)
-
-    n_iters = [n_iter] * n_ssc_total
-
-    result = smallScaleChain_mp(
-        n_chains=n_ssc_total,
-        n_workers=n_workers,
-        smallScaleChain=smallScaleChain,
-        initial_beds=initial_beds,
-        ssc_rng_seeds=ssc_seeds_flat,
-        lsc_seed_map=lsc_seed_map,
-        n_iters=n_iters,
-        output_path=output_path
-    )
     
+    # number of iterations used to run each chain
+    n_iters = [n_iter]*n_ssc_total
+
+    result = smallScaleChain_mp(n_ssc_total, n_workers, smallScaleChain, initial_beds, ssc_seeds, lsc_seed_map, n_iters, output_path = output_path)
